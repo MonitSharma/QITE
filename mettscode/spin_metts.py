@@ -1,150 +1,149 @@
 import numpy as np
-import itertools
-from   pyscf import lib
-from   scipy import linalg as LA
-from   code_v4.qite        import QITE_step
-from   code_v4.hamiltonian import Hmoms, Hpsi, Hmat
-#from   code_v3.lattice          import torus
-#from   code_v3.binary_functions import Int2Bas,Bas2Int,Opp2Str,Psi2Str
-#from   code_v3.pauli            import sigma_matrices,pauli_action
-#from   code_v3.ising            import Exp_mbH,H_average,H_ising_transverse,define_neighbors,MF_ave,MF_to_CI,HPsi
-#from   code_v3.it2rt            import rt2it
+from scipy import linalg as LA
+from pyscf import lib
 
 
-def metts_rt(H, nbits,nmetts,beta,db,outdir='./',tofile=True):
+import sys
+import os
 
+# Add the parent directory to sys.path
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+
+
+from code_v4.qite import QITE_step
+from code_v4.hamiltonian import Hmoms, Hpsi, Hmat, Heisenberg_SR
+
+
+def metts_rt(H, nbits, nmetts, beta, db, outdir="./", tofile=True):
+    """
+    Perform METTS (Minimally Entangled Typical Thermal States) calculations using real-time evolution.
+
+    Parameters:
+        H (list): Hamiltonian terms.
+        nbits (int): Number of bits (qubits/spins).
+        nmetts (int): Number of METTS samples.
+        beta (float): Inverse temperature (1/kT).
+        db (float): Time step for imaginary time evolution.
+        outdir (str): Directory for output files. Default is './'.
+        tofile (bool): Whether to save results to a file. Default is True.
+
+    Returns:
+        tuple: Energy per site (E) and standard error (err).
+    """
     Nbasis = 2**nbits
-    # parameters for time evolution
-    nt    = beta/(2*db)
-    if (abs(nt-int(nt))>1e-9):
+    nt = beta / (2 * db)
+    if abs(nt - int(nt)) > 1e-9:
         raise ValueError("beta/2 cannot be divided by the time step!")
-    else:
-        nt   = int(nt)
-   
-    # get initial guess
-    ci0   = np.zeros(Nbasis,dtype=np.complex128)
-    ci0[np.random.randint(0,Nbasis)] = 1
-   
-    # loop for 1) imaginary time evolution 2) measurement 3) collapse
+    nt = int(nt)
+
+    # Initialize the wavefunction
+    ci0 = np.zeros(Nbasis, dtype=np.complex128)
+    ci0[np.random.randint(0, Nbasis)] = 1
+
+    # Open output file if required
     if tofile:
-        fin  = open(outdir+"nbit%d_b%0.1f.txt"%(nbits,beta), "w")
-        fin.write("# metts#            E\n")
+        fout = open(outdir + f"nbit{nbits}_b{beta:.1f}.txt", "w")
+        fout.write("# METTS#            E\n")
+
     Elst = []
     for k in range(nmetts):
-        print "####Constructing METTS # %d ..."%(k+1)
-        #print "The chosen CPS is number: ",np.where(ci0!=0)[0][0]
-        # time evolution
-        for i in range(nt):
-            ci0 = QITE_step(H, ci0, db)
-        ea, ev = Hmoms(H,ci0) 
-        Emetts = ea # measure
-        if tofile:
-         fin.write("%d          %0.6f\n"%(k+1, Emetts))
-        print "METTS # %d      E = %0.6f"%(k+1,Emetts/nbits)
-        Elst.append(Emetts)
-        # collapse 
-        if k%2 == 0:
-            ci0 = collapse_metts(ci0, nbits, basis='X')
-        else:
-            ci0 = collapse_metts(ci0, nbits, basis='Z')
-        # done collapsing onto X
-            
-    if tofile:
-        fin.close()
-   
-    Elst = np.asarray(Elst)/nbits #energy per site
-    err  = np.std(Elst)/np.sqrt(nmetts)
-    E    = np.average(Elst)
-    return E, err
-    
+        print(f"#### Constructing METTS # {k + 1} ...")
 
-#^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        # Imaginary time evolution
+        for _ in range(nt):
+            ci0 = QITE_step(H, ci0, db)
+
+        # Measure energy
+        ea, _ = Hmoms(H, ci0)
+        Emetts = ea
+        if tofile:
+            fout.write(f"{k + 1}          {Emetts:.6f}\n")
+        print(f"METTS # {k + 1}      E = {Emetts / nbits:.6f}")
+        Elst.append(Emetts)
+
+        # Collapse onto a product state
+        basis = "X" if k % 2 == 0 else "Z"
+        ci0 = collapse_metts(ci0, nbits, basis)
+
+    if tofile:
+        fout.close()
+
+    Elst = np.asarray(Elst) / nbits  # Energy per site
+    err = np.std(Elst) / np.sqrt(nmetts)
+    E = np.average(Elst)
+    return E, err
+
+
 def collapse_metts(ci0, nbit, basis):
- # randomly pick a product state (from the basis set) based on the 
- # probabilitys
-    if basis=='X':
-        Hadamard = np.array([[1.,1.],[1.,-1.]])/np.sqrt(2)
+    """
+    Collapse the wavefunction to a product state in a given basis.
+
+    Parameters:
+        ci0 (np.ndarray): Wavefunction.
+        nbit (int): Number of bits (qubits/spins).
+        basis (str): Basis for collapse ('X' or 'Z').
+
+    Returns:
+        np.ndarray: Collapsed wavefunction.
+    """
+    if basis == "X":
+        Hadamard = np.array([[1., 1.], [1., -1.]]) / np.sqrt(2)
         U = Hadamard.copy()
-        for i in range(nbit-1):
+        for _ in range(nbit - 1):
             U = np.kron(U, Hadamard)
         ci0 = np.dot(U, ci0)
 
-    ci0 = ci0/np.linalg.norm(ci0)
-    pval = (ci0*ci0.conj()).real
-        
-    print "Probability distribution for CPS basis:"
-    print pval
-    #pval = pval/np.sum(pval)
-    cps = np.random.multinomial(1,pval).astype(np.complex128)
-    print "The chosen CPS is number: ",np.where(cps!=0)[0][0]
-    if basis=='X':
-        cps = np.dot(U,cps)
-    return cps  
+    ci0 /= np.linalg.norm(ci0)
+    pval = (ci0 * ci0.conj()).real
 
-#^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    print("Probability distribution for CPS basis:")
+    print(pval)
+
+    cps = np.random.multinomial(1, pval).astype(np.complex128)
+    print("The chosen CPS is number: ", np.where(cps != 0)[0][0])
+
+    if basis == "X":
+        cps = np.dot(U, cps)
+
+    return cps
+
+
 def finiteT_ED(H_, nbit, beta):
-    '''
-    Explicitly calculate the partition function and observable
-    averages by constructing the Hamiltonian matrix and diagonalize it.
-    '''
-    H = Hmat(H_)
-    # solve Hamiltonian
-    ew,ev = np.linalg.eigh(H)
-    Z = np.sum(np.exp(-beta*ew))
-    E = np.sum(ew*np.exp(-beta*ew))/Z
-    return E/nbit
+    """
+    Calculate energy at finite temperature by diagonalizing the Hamiltonian.
 
-##^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#def full_trace(H, nbit, beta, db):
-#    '''
-#    Test if the time evolution part is correct by doing
-#    the trace explicitly. (using the natural basis)
-#    '''
-#    Nbasis = 2**nbit
-#    # parameters for time evolution
-#    nt    = beta/(2*db)
-#    if (abs(nt-int(nt))>1e-9):
-#        raise ValueError("beta/2 cannot be divided by the time step!")
-#    else:
-#        nt   = int(nt)
-#   
-#    E = 0.
-#    Z = 0.
-#    for i in range(Nbasis):
-#        ci0 = np.zeros(Nbasis, dtype=np.complex128)
-#        ci0[i] = 1.0
-#        prefact = 1.0
-#        for t in range(nt):
-#            ci0 = QITE_step(H, ci0, db)
-#   
-#        ci0  /= np.linalg.norm(ci0) 
-#        ci0 *= prefact
-#        ea,ev = H_average(h_terms,ci0,ind_sx,gmm_sx)
-#        E    += ea
-#        Z    += np.real(np.dot(ci0,ci0.conj()))
-#   
-#    E = E/(Z*Nx*Ny)
-#    return E
-#      
-  
- 
-#^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    Parameters:
+        H_ (list): Hamiltonian terms.
+        nbit (int): Number of bits (qubits/spins).
+        beta (float): Inverse temperature (1/kT).
+
+    Returns:
+        float: Energy per site.
+    """
+    H = Hmat(H_)
+    ew, ev = np.linalg.eigh(H)
+    Z = np.sum(np.exp(-beta * ew))
+    E = np.sum(ew * np.exp(-beta * ew)) / Z
+    return E / nbit
+
 
 if __name__ == "__main__":
-    
-    from   code_v4.hamiltonian  import Heisenberg_SR
+    # Hamiltonian parameters
     nbits = 2
-    R     = 1.5
-    db    = 0.1
-    beta  = 2.00
-    nmetts  = 200
-    H = Heisenberg_SR(nbits,R)
-    ## FCI solution 
+    R = 1.5
+    db = 0.1
+    beta = 2.00
+    nmetts = 200
+
+    # Generate Hamiltonian
+    H = Heisenberg_SR(nbits, R)
+
+    # Compute ground-state energy via exact diagonalization
     Efci = finiteT_ED(H, nbits, beta)
-    ## Test real time evolution
-    ##Etest = full_trace(Nx, Ny, beta,db)
-    ## Metts
-    E,err = metts_rt(H,nbits,nmetts,beta,db)
-    print "fci result: ", Efci
-    #print "test time evolve: ", Etest
-    print "METTS result: %0.6f   standard deviation: %0.6f"%(E,err)
+
+    # Perform METTS calculations
+    E, err = metts_rt(H, nbits, nmetts, beta, db)
+
+    print(f"FCI result: {Efci:.6f}")
+    print(f"METTS result: {E:.6f}   Standard deviation: {err:.6f}")
